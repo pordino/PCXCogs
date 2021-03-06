@@ -2,8 +2,8 @@
 import aiohttp
 from redbot.core import __version__ as redbot_version
 
-user_agent = "Red-DiscordBot/{} BanCheck (https://github.com/PhasecoreX/PCXCogs)".format(
-    redbot_version
+user_agent = (
+    f"Red-DiscordBot/{redbot_version} BanCheck (https://github.com/PhasecoreX/PCXCogs)"
 )
 
 
@@ -27,6 +27,10 @@ class Imgur:
                         data = await resp.json()
                         if data and data["success"]:
                             return data["data"]["link"]
-        except aiohttp.client_exceptions.ClientError:
-            pass
+        except aiohttp.ClientError:
+            pass  # All aiohttp exceptions
+        except TypeError:
+            pass  # resp.json() is None
+        except KeyError:
+            pass  # json element does not exist
         return None

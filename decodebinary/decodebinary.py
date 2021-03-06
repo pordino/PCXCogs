@@ -1,77 +1,106 @@
 """DecodeBinary cog for Red-DiscordBot by PhasecoreX."""
-import asyncio
 import re
 
 import discord
 from redbot.core import Config, checks, commands
-from redbot.core.utils.chat_formatting import box
+from redbot.core.utils.chat_formatting import info
+
+from .pcx_lib import SettingDisplay, checkmark, type_message
 
 __author__ = "PhasecoreX"
 
 
 class DecodeBinary(commands.Cog):
-    """Decodes binary strings to human readable ones."""
+    """Decodes binary strings to human readable ones.
 
-    default_guild_settings = {"ignore_guild": False, "ignored_channels": []}
+    The bot will check every message sent by users for binary and try to
+    convert it to human readable text. You can check that it is working
+    by sending this message in a channel:
+
+    01011001011000010111100100100001
+    """
+
+    default_global_settings = {"schema_version": 0}
+    default_guild_settings = {"ignored_channels": []}
 
     def __init__(self, bot):
-        """Set up the plugin."""
+        """Set up the cog."""
         super().__init__()
         self.bot = bot
-        self.config = Config.get_conf(self, identifier=1224364860)
+        self.config = Config.get_conf(
+            self, identifier=1224364860, force_registration=True
+        )
+        self.config.register_global(**self.default_global_settings)
         self.config.register_guild(**self.default_guild_settings)
+
+    async def initialize(self):
+        """Perform setup actions before loading cog."""
+        await self._migrate_config()
+
+    async def _migrate_config(self):
+        """Perform some configuration migrations."""
+        if not await self.config.schema_version():
+            # Remove "ignore_guild"
+            guild_dict = await self.config.all_guilds()
+            for guild_id in guild_dict:
+                await self.config.guild_from_id(guild_id).clear_raw("ignore_guild")
+            await self.config.schema_version.set(1)
+
+    async def red_delete_data_for_user(self, **kwargs):
+        """Nothing to delete."""
+        return
 
     @commands.group()
     @commands.guild_only()
     @checks.admin_or_permissions(manage_guild=True)
-    async def decodebinaryignore(self, ctx: commands.Context):
-        """Change DecodeBinary cog ignore settings."""
-        if not ctx.invoked_subcommand:
-            guild = ctx.message.guild
-            ignore_guild = await self.config.guild(guild).ignore_guild()
-            ignored_channels = await self.config.guild(guild).ignored_channels()
-            ignore_channel = ctx.message.channel.id in ignored_channels
+    async def decodebinaryset(self, ctx: commands.Context):
+        """Change DecodeBinary settings."""
+        pass
 
-            msg = "Enabled on this server:  {}".format("No" if ignore_guild else "Yes")
-            if not ignore_guild:
-                msg += "\nEnabled in this channel: {}".format(
-                    "No" if ignore_channel else "Yes"
-                )
-            await ctx.send(box(msg))
+    @decodebinaryset.command()
+    async def settings(self, ctx: commands.Context):
+        """Display current settings."""
+        ignored_channels = await self.config.guild(ctx.guild).ignored_channels()
+        channel_section = SettingDisplay("Channel Settings")
+        channel_section.add(
+            "Enabled in this channel",
+            "No" if ctx.message.channel.id in ignored_channels else "Yes",
+        )
+        await ctx.send(str(channel_section))
 
-    @decodebinaryignore.command(name="server")
-    async def _decodebinaryignore_server(self, ctx: commands.Context):
+    @decodebinaryset.group()
+    async def ignore(self, ctx: commands.Context):
+        """Change DecodeBinary ignore settings."""
+        pass
+
+    @ignore.command()
+    async def server(self, ctx: commands.Context):
         """Ignore/Unignore the current server."""
-        guild = ctx.message.guild
-        if await self.config.guild(guild).ignore_guild():
-            await self.config.guild(guild).ignore_guild.set(False)
-            await ctx.send(checkmark("I will no longer ignore this server."))
-        else:
-            await self.config.guild(guild).ignore_guild.set(True)
-            await ctx.send(checkmark("I will ignore this server."))
+        await ctx.send(
+            info(
+                "Use the `[p]command enablecog` and `[p]command disablecog` to enable or disable this cog."
+            )
+        )
 
-    @decodebinaryignore.command(name="channel")
-    async def _decodebinaryignore_channel(self, ctx: commands.Context):
+    @ignore.command()
+    async def channel(self, ctx: commands.Context):
         """Ignore/Unignore the current channel."""
-        channel = ctx.message.channel
-        guild = ctx.message.guild
-        ignored_channels = await self.config.guild(guild).ignored_channels()
-        if channel.id in ignored_channels:
-            ignored_channels.remove(channel.id)
-            await ctx.send(checkmark("I will no longer ignore this channel."))
-        else:
-            ignored_channels.append(channel.id)
-            await ctx.send(checkmark("I will ignore this channel."))
-        await self.config.guild(guild).ignored_channels.set(ignored_channels)
+        async with self.config.guild(ctx.guild).ignored_channels() as ignored_channels:
+            if ctx.channel.id in ignored_channels:
+                ignored_channels.remove(ctx.channel.id)
+                await ctx.send(checkmark("I will no longer ignore this channel."))
+            else:
+                ignored_channels.append(ctx.channel.id)
+                await ctx.send(checkmark("I will ignore this channel."))
 
     @commands.Cog.listener()
     async def on_message_without_command(self, message: discord.Message):
         """Grab messages and see if we can decode them from binary."""
         if message.guild is None:
             return
-        if message.author.bot:
+        if await self.bot.cog_disabled_in_guild(self, message.guild):
             return
-        if await self.config.guild(message.guild).ignore_guild():
+        if message.author.bot:
             return
         if (
             message.channel.id
@@ -91,43 +120,33 @@ class DecodeBinary(commands.Cog):
             translated_messages.append(self.decode_binary_string(encoded))
 
         if len(translated_messages) == 1 and translated_messages[0]:
-            await self.send_message(
+            await type_message(
                 orig_message.channel,
-                '{}\'s message said:\n"{}"'.format(
-                    orig_message.author.display_name, translated_messages[0]
+                f'{orig_message.author.display_name}\'s message said:\n"{translated_messages[0]}"',
+                allowed_mentions=discord.AllowedMentions(
+                    everyone=False, users=False, roles=False
                 ),
             )
 
         elif len(translated_messages) > 1:
             translated_counter = 0
             one_was_translated = False
-            msg = "{}'s {} messages said:".format(
-                orig_message.author.display_name, len(translated_messages)
-            )
+            msg = f"{orig_message.author.display_name}'s {len(translated_messages)} messages said:"
             for translated_message in translated_messages:
                 translated_counter += 1
                 if translated_message:
                     one_was_translated = True
-                    msg += '\n{}. "{}"'.format(translated_counter, translated_message)
+                    msg += f'\n{translated_counter}. "{translated_message}"'
                 else:
-                    msg += "\n{}. (Couldn't translate this one...)".format(
-                        translated_counter
-                    )
+                    msg += f"\n{translated_counter}. (Couldn't translate this one...)"
             if one_was_translated:
-                await self.send_message(orig_message.channel, msg)
-
-    async def send_message(self, channel: discord.TextChannel, message: str):
-        """Send a message to a channel.
-
-        Will send a typing indicator, and will wait a variable amount of time
-        based on the length of the text (to simulate typing speed)
-        """
-        try:
-            async with channel.typing():
-                await asyncio.sleep(len(message) * 0.01)
-                await self.bot.send_filtered(channel, content=message)
-        except discord.Forbidden:
-            pass  # Not allowed to send messages in this channel
+                await type_message(
+                    orig_message.channel,
+                    msg,
+                    allowed_mentions=discord.AllowedMentions(
+                        everyone=False, users=False, roles=False
+                    ),
+                )
 
     @staticmethod
     def decode_binary_string(string: str):
@@ -150,8 +169,3 @@ class DecodeBinary(commands.Cog):
             return True
         except UnicodeEncodeError:
             return False
-
-
-def checkmark(text: str) -> str:
-    """Get text prefixed with a checkmark emoji."""
-    return "\N{WHITE HEAVY CHECK MARK} {}".format(text)
